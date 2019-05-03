@@ -24,6 +24,7 @@ dependencies:
 - accelerate-llvm
 - accelerate-llvm-native
 - accelerate
+- gloss
 
 library:
   source-dirs: src

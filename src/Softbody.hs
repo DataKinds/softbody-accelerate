@@ -1,4 +1,6 @@
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module Softbody where
 
@@ -23,25 +25,25 @@ type C = Matrix Double
   |             |
   |             |
   3-------------2
-
 -}
 
 my_c :: C
-my_c = fromList (Z:.4:.4) [
-  0,   1,   sq2, 1,
-  1,   0,   1,   sq2,
-  sq2, 1,   0,   1,
-  1,   sq2, 1,   0
-  ]
+my_c = fromList (Z:.4:.4) list
   where
     sq2 = 1.41421356237
+    list = P.fmap ((P.*) 100.0) [
+      0,   1,   sq2, 1,
+      1,   0,   1,   sq2,
+      sq2, 1,   0,   1,
+      1,   sq2, 1,   0
+      ]
 
 my_v :: V
 my_v = fromList (Z:.4) [
   ((0.0 :+ 0.0), (0.0 :+ 0.0), (0.0 :+ 0.0), 1.0),
-  ((1.0 :+ 0.0), (0.0 :+ 0.0), (0.0 :+ 0.0), 1.0),
-  ((1.0 :+ (-1.0)), (0.0 :+ 0.0), (0.0 :+ 0.0), 1.0),
-  ((0.0 :+ (-1.0)), (0.0 :+ 0.0), (0.0 :+ 0.0), 1.0)
+  ((10.0 :+ 0.0), (0.0 :+ 0.0), (0.0 :+ 0.0), 1.0),
+  ((10.0 :+ (-10.0)), (0.0 :+ 0.0), (0.0 :+ 0.0), 1.0),
+  ((0.0 :+ (-100.0)), (0.0 :+ 0.0), (0.0 :+ 0.0), 1.0)
   ]
 
 -------------------------------------------------------------------------------
@@ -94,7 +96,10 @@ c_offset_ij c_ij pi_i pi_j =
 
 make_c_offset :: Acc C -> Acc V -> Acc (Matrix Coord)
 make_c_offset c v =
-    imap
+  let
+    replaceNaNs = map (\n -> ifThenElse (let mag = magnitude n in isNaN mag || isInfinite mag) (constant $ 0 :+ 0) n)
+  in
+    replaceNaNs $ imap
       (\sh c_ij ->
          let
            ij = unindex2 sh
@@ -106,34 +111,51 @@ make_c_offset c v =
 ------------------------------------------------------------------------------------
 -- new_v_a
 
+-- from https://hackage.haskell.org/package/accelerate-1.2.0.1/docs/Data-Array-Accelerate.html
+-- matrix-vector multiplication
+mvm :: (Elt a, Num a) => Acc (Matrix a) -> Acc (Vector a) -> Acc (Vector a)
+mvm mat vec =
+  let Z :. rows :. cols = unlift (shape mat) :: Z :. Exp Int :. Exp Int
+      vec'              = A.replicate (lift (Z :. rows :. All)) vec
+  in
+    A.fold (+) 0 ( A.zipWith (*) mat vec' )
+
 new_v_a :: Acc (Matrix Coord) -> Acc V -> Acc (Vector Coord)
 new_v_a c_offset v =
   let
     v_rho_recip = map ((\rho_recip -> lift $ rho_recip :+ 0) . (\rho -> 1 / rho) . node_rho) v
   in
-    -- this is c_offset * v_rho_recip
-    fold1 (+) (imap (\sh a -> v_rho_recip !! (indexHead sh)) c_offset)
+    --map (\z -> z * (lift $ magnitude z :+ 0)) c_offset `mvm` v_rho_recip
+    c_offset `mvm` v_rho_recip
 
 ------------------------------------------------------------------------------------
 -- updating V
+-- (this includes euler integration on pi, delta)
 
-new_v :: C
-      -> V
-      -> Double -- time
-      -> Double -- damping
+new_v :: Acc C
       -> Acc V
-new_v _c _v _t _d =
+      -> Acc (Scalar (Complex Double)) -- time
+      -> Acc (Scalar (Complex Double)) -- damping
+      -> Acc V
+new_v c v _t _d =
   let
-    v = use _v
-    c = use _c
-    t = constant (_t :+ 0)
-    d = constant (_d :+ 0)
+    t = the _t
+    d = the _d
+    energyBleed = constant (0.99 :+ 0)
     c_offset = make_c_offset c v
     v_a' = new_v_a c_offset v
   in
-    zipWith (\node new_a -> lift
-              (node_pi node,
-               node_delta node,
-               (node_alpha node) + d * (new_a * t - node_alpha node),
-               node_rho node)) v v_a'
+    zipWith (\node new_a ->
+               let
+                 -- Old: new_delta = (node_delta node) + (t * new_alpha)
+                 -- New:
+                 -- We _need_ a way to bleed off energy, and so friction is the easiest.
+                 -- TODO: make energyBleed depend on t
+                 -- Other possible methods:
+                 -- Deformation (plasticity -- I want to do this!), air resistance (less bleed when moving slower)
+                 new_alpha = (node_alpha node) + d * (new_a * t - node_alpha node)
+                 new_delta = energyBleed * ((node_delta node) + (t * new_alpha)) -- + (t**2 * new_alpha) 
+                 new_pi    = (node_pi node)    + (t * new_delta) -- + (t**4 * new_alpha) 
+               in
+                 lift (new_pi, new_delta, new_alpha, node_rho node)) v v_a'
     
