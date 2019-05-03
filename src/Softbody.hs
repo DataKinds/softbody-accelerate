@@ -92,12 +92,8 @@ c_offset_ij c_ij pi_i pi_j =
   in
     (fmap ((*) scale_factor) diff_vec) - diff_vec
 
-make_c_offset :: C -> V -> Acc (Matrix Coord)
-make_c_offset _c _v =
-  let
-    c = use _c
-    v = use _v
-  in
+make_c_offset :: Acc C -> Acc V -> Acc (Matrix Coord)
+make_c_offset c v =
     imap
       (\sh c_ij ->
          let
@@ -110,10 +106,9 @@ make_c_offset _c _v =
 ------------------------------------------------------------------------------------
 -- new_v_a
 
-new_v_a :: Acc (Matrix Coord) -> V -> Acc (Vector Coord)
-new_v_a c_offset _v =
+new_v_a :: Acc (Matrix Coord) -> Acc V -> Acc (Vector Coord)
+new_v_a c_offset v =
   let
-    v = use _v
     v_rho_recip = map ((\rho_recip -> lift $ rho_recip :+ 0) . (\rho -> 1 / rho) . node_rho) v
   in
     -- this is c_offset * v_rho_recip
@@ -122,4 +117,23 @@ new_v_a c_offset _v =
 ------------------------------------------------------------------------------------
 -- updating V
 
---new_v :: C -> V -> Double -> Acc V
+new_v :: C
+      -> V
+      -> Double -- time
+      -> Double -- damping
+      -> Acc V
+new_v _c _v _t _d =
+  let
+    v = use _v
+    c = use _c
+    t = constant (_t :+ 0)
+    d = constant (_d :+ 0)
+    c_offset = make_c_offset c v
+    v_a' = new_v_a c_offset v
+  in
+    zipWith (\node new_a -> lift
+              (node_pi node,
+               node_delta node,
+               (node_alpha node) + d * (new_a * t - node_alpha node),
+               node_rho node)) v v_a'
+    
